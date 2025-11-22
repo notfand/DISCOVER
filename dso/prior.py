@@ -36,7 +36,8 @@ def make_prior(library, config_prior):
         'diff_descedent2': DiffConstraint_des2,
         'laplace_child':LaplaceConstraint,
         "subgrid_des_constraint":SubgridDesConstraint,
-        "subgrid_des_constraint2":SubgridDesConstraint2
+        "subgrid_des_constraint2":SubgridDesConstraint2,
+        "complexity": ComplexityConstraint,
         
         
     }
@@ -1011,4 +1012,77 @@ class SoftLengthPrior(Prior):
 
 class SoftItermPrior(Prior):
     pass
+
+
+class ComplexityConstraint(Constraint):
+    """Constrain cumulative token complexity to be within a range [min_, max_].
+
+    Parameters
+    ----------
+    min_ : float or None
+        Minimum required sum of token complexities to allow termination.
+    max_ : float or None
+        Maximum allowed sum of token complexities for a Program.
+    """
+
+    def __init__(self, library, min_=None, max_=None):
+        Prior.__init__(self, library)
+        self.min = min_
+        self.max = max_
+        assert (self.min is not None) or (self.max is not None), "At least one of (min_, max_) must be provided for ComplexityConstraint"
+        self.complexities = np.array([t.complexity for t in self.library.tokens], dtype=np.float32)
+
+    def __call__(self, actions, parent, sibling, dangling):
+        prior = self.init_zeros(actions)
+        # Current cumulative complexity per sample
+        if actions.shape[1] == 0:
+            return prior
+        empty_act = self.library.EMPTY_ACTION
+        cur = np.array([
+            self.complexities[row[row != empty_act]].sum() if np.any(row != empty_act) else 0.0
+        for row in actions], dtype=np.float32)
+        # Enforce minimum: 若已可结束(dangling==1)且当前复杂度未达min_，禁止终结符
+        if self.min is not None:
+            need_more = (cur < self.min) & (dangling == 1)
+            if np.any(need_more):
+                prior += self.make_constraint(need_more, self.library.terminal_tokens)
+
+        # Enforce maximum: 预留收尾终结符复杂度预算，限制下一步选择
+        if self.max is not None:
+            remaining = self.max - cur
+            required = np.maximum(dangling, 1).astype(np.float32)
+            rem_for_token = remaining - required
+            mask_tight = rem_for_token <= 0.0
+            if np.any(mask_tight):
+                prior += self.make_constraint(mask_tight, self.library.unary_tokens)
+                prior += self.make_constraint(mask_tight, self.library.binary_tokens)
+            for i, rem in enumerate(rem_for_token):
+                if rem >= 0:
+                    bad_tokens = np.where(self.complexities > rem)[0].astype(np.int32)
+                    # 若剩余预算 < 1，则也禁止终结符（通常复杂度为1），避免最终超限
+                    if rem >= 1.0:
+                        term_set = set(self.library.terminal_tokens.tolist())
+                        bad_tokens = np.array([t for t in bad_tokens if t not in term_set], dtype=np.int32)
+                    if bad_tokens.size > 0:
+                        prior[i:i+1] += self.make_constraint(np.array([True]), bad_tokens)
+        return prior
+
+    def is_violated(self, actions, parent, sibling):
+        row = actions[0]
+        empty_act = self.library.EMPTY_ACTION
+        cur = self.complexities[row[row != empty_act]].sum() if np.any(row != empty_act) else 0.0
+        if self.max is not None and cur > self.max:
+            return True
+        if self.min is not None and cur < self.min and np.all(row == empty_act):
+            return True
+        return False
+
+    def describe(self):
+        parts = []
+        if self.min is not None:
+            parts.append("minimum cumulative complexity {}".format(self.min))
+        if self.max is not None:
+            parts.append("maximum cumulative complexity {}".format(self.max))
+        message = "{}: Sequences have {}.".format(self.__class__.__name__, " and ".join(parts))
+        return message
 

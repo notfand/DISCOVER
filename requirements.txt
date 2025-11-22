@@ -18,3 +18,4 @@ tensorflow==1.14
 torch
 tqdm
 xarray
+openpyxl
