@@ -11,7 +11,7 @@ This repository provides the code and data for following research papers:
 
 
 # Framework
- ![framework](./dso/framework.png)
+ ![framework](./framework.png)
 
 # Installation
 ```
